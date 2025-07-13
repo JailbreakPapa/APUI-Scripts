@@ -1,9 +1,8 @@
+# Copyright Mikael K. Aboagye & WD Studios Corp.
 #
-# V8 Build Script for Windows, Linux, and FreeBSD
+# Advanced V8 Build Script for Windows, Linux, and FreeBSD
 #
-# This script automates the process of building a specific version of the V8 JavaScript engine.
-# It can produce a monolithic static library or a component build (shared library),
-# in either release or debug configurations.
+# This script automates building V8, including support for custom forks and MSVC-specific flags.
 #
 # Prerequisites:
 # 1.  General:
@@ -12,7 +11,7 @@
 #
 # 2.  Windows:
 #     - Windows 10 or later (64-bit).
-#     - Visual Studio 2022 (or 2019) with the "Desktop development with C++" workload installed.
+#     - Visual Studio 2022 with the "Desktop development with C++" workload installed.
 #       Ensure the English language pack is installed.
 #
 # 3.  Linux (Debian/Ubuntu):
@@ -22,23 +21,24 @@
 #     - pkg install devel/git python3 devel/clang
 #
 # How to run:
-# 1.  Save this script as a Python file (e.g., `build_v8.py`).
-# 2.  Open a terminal or command prompt and navigate to where you saved the file.
-# 3.  For a static release library (default): `python3 build_v8.py`
-# 4.  For a debug shared library build: `python3 build_v8.py --build-type dll --config debug`
-# 5.  To specify a custom workspace: `python3 build_v8.py --workspace /path/to/my_v8_build`
-# 6.  To provide custom GN arguments from a file: `python3 build_v8.py --gn-args-file my_args.txt`
+# 1.  Save this script as a Python file (e.g., `build_v8_advanced.py`).
+# 2.  Open a terminal or command prompt. For Windows, this MUST be run with
+#     **Administrator privileges**. A Developer Command Prompt is also recommended.
+# 3.  Examples:
+#     - Default build (official V8, static, release):
+#       `python3 build_v8_advanced.py`
+#
+#     - Build without the Rust toolchain dependency:
+#       `python3 build_v8_advanced.py --no-rust`
 #
 
 import os
 import subprocess
 import sys
 import argparse
+import ctypes
 
 # --- Configuration ---
-# The specific version of V8 you want to build.
-V8_VERSION = "12.1.3"
-
 # The URL for the depot_tools repository.
 DEPOT_TOOLS_URL = "https://chromium.googlesource.com/chromium/tools/depot_tools.git"
 
@@ -47,7 +47,7 @@ def run_command(command, working_dir=None, env=None):
     Executes a shell command and prints its output in real-time.
     Exits the script if the command fails.
     """
-    print(f"--- Running command: {' '.join(command)}")
+    print(f"--- Running command: {' '.join(command)} in '{working_dir}'")
     try:
         command_str = ' '.join(command)
         process = subprocess.Popen(
@@ -80,122 +80,117 @@ def run_command(command, working_dir=None, env=None):
         sys.exit(1)
     print(f"--- Command finished successfully.")
 
+def check_admin_privileges():
+    """Checks for administrator privileges on Windows and exits if not found."""
+    if sys.platform != "win32":
+        return # Not applicable for non-Windows platforms
+    try:
+        is_admin = (os.getuid() == 0)
+    except AttributeError:
+        is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
+    
+    if not is_admin:
+        print("\n" + "="*80)
+        print("--- ERROR: Administrator privileges are required.")
+        print("Please re-run this script from a command prompt with Administrator rights.")
+        print("Right-click your Command Prompt/Terminal icon and select 'Run as administrator'.")
+        print("="*80)
+        sys.exit(1)
+    print("--- Administrator privileges confirmed.")
+
 def main():
     """Main function to orchestrate the build process."""
+    check_admin_privileges()
 
     # --- Platform Detection ---
     is_windows = sys.platform == "win32"
-    is_linux = sys.platform.startswith("linux")
-    is_freebsd = sys.platform.startswith("freebsd")
     
     # --- Argument Parsing ---
     parser = argparse.ArgumentParser(
-        description="Build V8 on Windows, Linux, and FreeBSD.",
+        description="WD Studios's V8 Build Script that supports all platforms. (non-console-version)",
         formatter_class=argparse.RawTextHelpFormatter
     )
-    parser.add_argument(
-        '--workspace',
-        type=str,
-        default='v8_build',
-        help='The directory where all work will be done. Defaults to "./v8_build"'
-    )
-    parser.add_argument(
-        '--build-type',
-        type=str,
-        choices=['static', 'dll'],
-        default='static',
-        help='The type of build to produce:\n'
-             '"static" (monolithic .lib/.a, default)\n'
-             '"dll"    (component/shared .dll/.so)'
-    )
-    parser.add_argument(
-        '--config',
-        type=str,
-        choices=['release', 'debug'],
-        default='release',
-        help='The build configuration:\n'
-             '"release" (optimized, default)\n'
-             '"debug"   (includes debug symbols)'
-    )
-    parser.add_argument(
-        '--gn-args-file',
-        type=str,
-        help='Path to a file containing additional GN arguments, one per line.\n'
-             'Example line: v8_enable_i18n_support=false'
-    )
+    parser.add_argument('--workspace', type=str, default='v8_build', help='The directory where all work will be done.')
+    parser.add_argument('--build-type', type=str, choices=['static', 'dll'], default='static', help='Build a static library (.lib/.a) or shared library (.dll/.so).')
+    parser.add_argument('--config', type=str, choices=['release', 'debug'], default='release', help='Build configuration.')
+    parser.add_argument('--gn-args-file', type=str, help='Path to a file with additional GN arguments.')
+    parser.add_argument('--v8-fork-url', type=str, help='URL of a custom V8 git repository to build.')
+    parser.add_argument('--v8-fork-branch', type=str, default='main', help='Branch, tag, or commit to check out from the custom fork.')
+    parser.add_argument('--msvc', action='store_true', help='On Windows, add GN flags to explicitly use the MSVC toolchain instead of clang-cl.')
+    parser.add_argument('--no-rust', action='store_true', help='Disable Rust toolchain download and dependency.')
+    parser.add_argument('--no-custom-cxx', action='store_true', help='Disable custom C++ toolchain download and dependency. The custom C++ toolchain causes problems with Windows builds.')
     args = parser.parse_args()
     
     V8_BASE_DIR = os.path.abspath(args.workspace)
-    print(f"--- Chrome Dev Tools Frontend Builder. Copyright Mikael K. Aboagye & WD Studios Corp. All Rights Reserved. ---")
-    print(f"--- Starting V8 Build Process ---")
-    print(f"           OS: {sys.platform}")
-    print(f"    Workspace: {V8_BASE_DIR}")
-    print(f"   Build Type: {args.build_type}")
-    print(f"Configuration: {args.config}")
-    if args.gn_args_file:
-        print(f" Custom Args.: {os.path.abspath(args.gn_args_file)}")
+    
+    print("--- V8 Build Configuration ---")
+    for arg, value in vars(args).items():
+        print(f"  {arg.replace('_', '-'):<15}: {value}")
+    print("-" * 30)
 
-
-    # 1. Create the main directory for the build process
+    # 1. Create and set up workspace and depot_tools
     if not os.path.exists(V8_BASE_DIR):
-        print(f"--- Creating base directory: {V8_BASE_DIR}")
         os.makedirs(V8_BASE_DIR)
 
-    # 2. Set up depot_tools
     depot_tools_dir = os.path.join(V8_BASE_DIR, "depot_tools")
     if not os.path.exists(depot_tools_dir):
         print("--- Cloning depot_tools...")
         run_command(["git", "clone", DEPOT_TOOLS_URL, depot_tools_dir])
     else:
-        print("--- depot_tools already exists. Skipping clone.")
+        print("--- depot_tools already exists.")
 
-    # 3. Add depot_tools to the PATH for this script's execution
-    original_path = os.environ["PATH"]
-    os.environ["PATH"] = f"{depot_tools_dir}{os.pathsep}{original_path}"
-    
-    # Set Windows-specific environment variable
+    os.environ["PATH"] = f"{depot_tools_dir}{os.pathsep}{os.environ['PATH']}"
     if is_windows:
         os.environ["DEPOT_TOOLS_WIN_TOOLCHAIN"] = "0"
     
     print("--- Bootstrapping depot_tools...")
     run_command(["gclient"], working_dir=V8_BASE_DIR)
 
-    # 4. Fetch the V8 source code
+    # 2. Fetch V8 source code
     v8_src_dir = os.path.join(V8_BASE_DIR, "v8")
     if not os.path.exists(v8_src_dir):
-        print("--- Fetching V8 source code...")
-        # On non-Windows, fetch might need python explicitly. The bootstrapped one should be in PATH.
-        fetch_cmd = "fetch.py" if is_windows else "python3 `which fetch.py`"
-        run_command([fetch_cmd, "v8"], working_dir=V8_BASE_DIR)
-
+        print("--- Fetching official V8 source code (base)...")
+        run_command(["fetch", "v8"], working_dir=V8_BASE_DIR)
     else:
-        print("--- V8 source directory already exists. Skipping fetch.")
+        print("--- V8 source directory already exists.")
 
-    # 5. Checkout the specific version tag and sync
-    print(f"--- Checking out V8 version: {V8_VERSION}")
-    run_command(["git", "checkout", V8_VERSION], working_dir=v8_src_dir)
+    # 3. Handle custom fork if specified
+    if args.v8_fork_url:
+        print(f"--- Integrating custom V8 fork from: {args.v8_fork_url}")
+        # Check if remote already exists
+        try:
+            subprocess.check_output(["git", "remote", "get-url", "fork"], cwd=v8_src_dir, stderr=subprocess.STDOUT)
+            print("--- 'fork' remote already exists. Setting new URL.")
+            run_command(["git", "remote", "set-url", "fork", args.v8_fork_url], working_dir=v8_src_dir)
+        except subprocess.CalledProcessError:
+            print("--- Adding 'fork' remote.")
+            run_command(["git", "remote", "add", "fork", args.v8_fork_url], working_dir=v8_src_dir)
+        
+        print("--- Fetching from custom fork...")
+        run_command(["git", "fetch", "fork"], working_dir=v8_src_dir)
+        print(f"--- Checking out branch/tag: {args.v8_fork_branch}")
+        run_command(["git", "checkout", f"fork/{args.v8_fork_branch}"], working_dir=v8_src_dir)
+    else:
+        # Default to a recent known tag if no fork is specified.
+        run_command(["git", "checkout", "12.1.285.27"], working_dir=v8_src_dir)
 
     print("--- Synchronizing dependencies with gclient sync...")
     run_command(["gclient", "sync"], working_dir=v8_src_dir)
 
-    # 7. Generate build files with GN
-    print(f"--- Generating build files for x64/{args.config} ({args.build_type} build)...")
-    
+    # 4. Generate build files with GN
     output_path = f"out.gn/x64.{args.config}"
-    build_target = ""
+    print(f"--- Generating build files in: {output_path}")
     
     gn_args = [
         f'is_debug={str(args.config == "debug").lower()}',
-        'target_cpu="x64"',
+        'target_cpu=""x64""',
         'v8_use_external_startup_data=false',
-        'treat_warnings_as_errors=false'
+        'treat_warnings_as_errors=false',
     ]
     
-    if is_linux or is_freebsd:
-        gn_args.append('is_clang=true')
-    
-    if is_freebsd:
-        gn_args.append('target_os="freebsd"')
+    if args.no_rust:
+        print("--- Disabling Rust toolchain dependency.")
+        gn_args.append('v8_enable_rust=false')
 
     if args.build_type == 'static':
         gn_args.extend(['is_component_build=false', 'v8_monolithic=true'])
@@ -204,50 +199,33 @@ def main():
         gn_args.extend(['is_component_build=true', 'v8_monolithic=false'])
         build_target = 'v8'
 
-    # Add custom arguments from file if provided
-    if args.gn_args_file:
-        gn_args_file_path = os.path.abspath(args.gn_args_file)
-        if os.path.exists(gn_args_file_path):
-            print(f"--- Reading custom GN args from {gn_args_file_path}")
-            with open(gn_args_file_path, 'r') as f:
-                for line in f:
-                    line = line.strip()
-                    if line and not line.startswith('#'):
-                        gn_args.append(line)
-        else:
-            print(f"--- WARNING: GN args file not found at {gn_args_file_path}. Skipping.")
+    if is_windows and args.msvc:
+        print("--- Applying MSVC-specific GN flags...")
+        gn_args.extend(['is_clang=false', 'v8_win_clang=false'])
+    elif not is_windows:
+        gn_args.append('is_clang=true')
+
+    if args.gn_args_file and os.path.exists(args.gn_args_file):
+        print(f"--- Reading custom GN args from {args.gn_args_file}")
+        with open(args.gn_args_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    gn_args.append(line)
 
     gn_command_str = f'gn gen {output_path} --args="{" ".join(gn_args)}"'
     print(f"--- Using GN command: {gn_command_str}")
     subprocess.run(gn_command_str, check=True, cwd=v8_src_dir, shell=True)
 
-    # 8. Build V8 with Ninja
+    # 5. Build V8 with Ninja
     print(f"--- Building V8 target '{build_target}' with Ninja...")
     run_command(["ninja", "-C", output_path, build_target], working_dir=v8_src_dir)
 
-    # 9. Final output message
+    # 6. Final output message
     print(f"\n--- V8 ({args.build_type} / {args.config} build) Process Completed Successfully! ---")
-    output_dir = os.path.join(v8_src_dir, output_path)
-    
-    if args.build_type == 'static':
-        print(f"The built static library can be found at:")
-        if is_windows:
-            lib_path = os.path.join(output_dir, "obj", "v8_monolithic.lib")
-        else: # Linux/FreeBSD
-            lib_path = os.path.join(output_dir, "obj", "libv8_monolithic.a")
-        print(lib_path)
-    else:  # dll or .so
-        print("The built shared library and related files can be found in:")
-        print(output_dir)
-        if is_windows:
-            print(f"  - {os.path.join(output_dir, 'v8.dll')}")
-            print(f"  - {os.path.join(output_dir, 'v8.dll.lib')}")
-        else: # Linux/FreeBSD
-            print(f"  - {os.path.join(output_dir, 'libv8.so')}")
-        print("\nOther required files (like .dat snapshot files) are also in that directory.")
-
-    print("\nInclude headers are located at:")
-    print(os.path.join(v8_src_dir, "include"))
+    final_output_dir = os.path.join(v8_src_dir, output_path)
+    print(f"Build artifacts are located in: {final_output_dir}")
+    print(f"Include headers are located at: {os.path.join(v8_src_dir, 'include')}")
 
 if __name__ == "__main__":
     main()
